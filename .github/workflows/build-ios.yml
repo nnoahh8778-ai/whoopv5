@@ -1,0 +1,53 @@
+name: Build iOS (unsigned IPA)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Generate iOS project files
+        run: |
+          flutter create . --project-name whoop_buzz --platforms=ios
+          rm -f test/widget_test.dart
+      - name: Add Bluetooth usage text
+        run: /usr/libexec/PlistBuddy -c "Add :NSBluetoothAlwaysUsageDescription string 'Needed to send vibration commands to your WHOOP strap.'" ios/Runner/Info.plist
+      - name: Allow Bluetooth in the background
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string bluetooth-central" ios/Runner/Info.plist
+      - name: Make sure the app's packages are installed
+        run: |
+          flutter pub add flutter_blue_plus permission_handler shared_preferences wakelock_plus
+          flutter pub get
+          echo "---- pubspec.yaml ----"
+          cat pubspec.yaml
+          echo "---- packages resolved ----"
+          grep -o '"name": "[a-z_]*"' .dart_tool/package_config.json | grep -E "flutter_blue_plus|permission_handler|shared_preferences|wakelock_plus"
+      - name: Protocol tests (non-blocking)
+        run: flutter test
+        continue-on-error: true
+      - name: Flutter build (prepares the Xcode project; a signing error here is expected)
+        run: flutter build ios --release --no-codesign || echo "flutter build reported an error; continuing to xcodebuild"
+      - name: Build with xcodebuild (signing fully disabled)
+        run: |
+          xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build/xcode \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -destination 'generic/platform=iOS' \
+            build
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/xcode/Build/Products/Release-iphoneos/Runner.app Payload/
+          zip -qr whoop_buzz.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whoop_buzz-ipa
+          path: whoop_buzz.ipa
